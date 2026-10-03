@@ -24,7 +24,7 @@
 			"database_name": "simple-prayer-relay",
 			// Not a secret — an account-scoped handle, useless without credentials — so it lives in the
 			// public repo.
-			"database_id": "335289df-2a76-40f5-b4f2-48fd18ba87d9",
+			"database_id": "721d65a3-04f7-403e-9eed-547878b002a1",
 			"migrations_dir": "migrations"
 		}
 	],
