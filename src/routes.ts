@@ -225,7 +225,13 @@ async function deletePairRoute(env: Env, caller: Caller, pairId: string): Promis
  * phone for it. The push is a doorbell: if it never arrives, or arrives and is swiped away, the
  * inbox still has the flag when the app next opens.
  */
-async function postSend(request: Request, env: Env, caller: Caller, now: number): Promise<Response> {
+async function postSend(
+  request: Request,
+  env: Env,
+  caller: Caller,
+  now: number,
+  defer: Defer,
+): Promise<Response> {
   const body = await readJson(request);
   const parsed = parseSendBody(body, now);
   if (!parsed.ok) return empty(400);
@@ -257,7 +263,10 @@ async function postSend(request: Request, env: Env, caller: Caller, now: number)
 
   // Only a flag that changed something is worth a doorbell. The same flag arriving twice — the
   // widget sent it and then the app did, or a retry — is accepted and stays silent.
-  if (changed) await notifyMark(env, partner, send);
+  //
+  // Deferred: the sender's phone waits on this response before anything else it has queued, and
+  // the Expo round trip added its whole latency to that wait. The flag is in the inbox already.
+  if (changed) await defer(notifyMark(env, partner, send));
 
   return empty(202);
 }
@@ -327,7 +336,18 @@ async function postInboxAck(request: Request, env: Env, caller: Caller): Promise
 // Router
 // ---------------------------------------------------------------------------------------------
 
-export async function route(request: Request, env: Env, now: number): Promise<Response> {
+/**
+ * Runs work that must finish but need not hold the response: `ctx.waitUntil` in the Worker. The
+ * default awaits it, so a caller without an execution context (the tests) sees it complete.
+ */
+export type Defer = (work: Promise<void>) => Promise<void> | void;
+
+export async function route(
+  request: Request,
+  env: Env,
+  now: number,
+  defer: Defer = (work) => work,
+): Promise<Response> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
   const method = request.method.toUpperCase();
@@ -350,7 +370,7 @@ export async function route(request: Request, env: Env, now: number): Promise<Re
   if (path === '/device' && method === 'DELETE') return deleteDeviceRoute(env, caller);
   if (path === '/invite' && method === 'POST') return postInvite(env, caller, now);
   if (path === '/pair' && method === 'POST') return postPair(request, env, caller, now);
-  if (path === '/send' && method === 'POST') return postSend(request, env, caller, now);
+  if (path === '/send' && method === 'POST') return postSend(request, env, caller, now, defer);
   if (path === '/pairs' && method === 'GET') return getPairs(env, caller, now);
   if (path === '/prefs' && method === 'POST') return postPrefs(request, env, caller, now);
   if (path === '/inbox' && method === 'GET') return getInbox(env, caller, now);

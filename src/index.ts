@@ -17,7 +17,7 @@ import { sentryOptions } from './sentry';
 const SWEEP_MONITOR = 'relay-sweep';
 
 const handler: ExportedHandler<Env> = {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     // Cloudflare terminates TLS before us, so this only ever fires if the Worker is reached some
     // other way. The relay refuses to speak plaintext rather than trust that it cannot happen.
     if (new URL(request.url).protocol !== 'https:') {
@@ -25,7 +25,7 @@ const handler: ExportedHandler<Env> = {
     }
 
     try {
-      return await route(request, env, Date.now());
+      return await route(request, env, Date.now(), (work) => ctx.waitUntil(work));
     } catch (error) {
       // Sentry gets the error (scrubbed — see sentry.ts). The caller gets a bare 500: which
       // statement failed is our problem, not information to hand out.

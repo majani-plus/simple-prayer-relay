@@ -8,6 +8,7 @@
 // A push is a doorbell, never the delivery. Everything here is best-effort: a failure is swallowed,
 // because the flag is already in the inbox and the phone will collect it when it next opens.
 
+import * as Sentry from '@sentry/cloudflare';
 import { forgetPushToken, getDevice } from './db';
 import { decryptToken } from './crypto';
 import type { BuddyPayload, MarkPayload } from './protocol';
@@ -16,7 +17,7 @@ import type { Env } from './routes';
 
 const SEND_URL = 'https://exp.host/--/api/v2/push/send';
 
-interface ExpoMessage {
+export interface ExpoMessage {
   to: string;
   data: BuddyPayload;
   title?: string;
@@ -90,16 +91,32 @@ async function deliver(env: Env, deviceId: string, message: ExpoMessage): Promis
     body: JSON.stringify(message),
   });
 
-  if (!response.ok) return;
+  if (!response.ok) {
+    // A rejected request (bad access token, Expo outage) silently stops EVERY push, and nothing
+    // else would ever say so. The status code only — no token, no device, no body.
+    report(`expo push rejected: HTTP ${response.status}`);
+    return;
+  }
 
   const payload = (await response.json()) as { data?: ExpoTicket | ExpoTicket[] };
   const tickets = Array.isArray(payload.data) ? payload.data : payload.data ? [payload.data] : [];
 
   for (const ticket of tickets) {
-    if (ticket.status === 'error' && ticket.details?.error === 'DeviceNotRegistered') {
+    if (ticket.status !== 'error') continue;
+    if (ticket.details?.error === 'DeviceNotRegistered') {
       await forgetPushToken(env.DB, deviceId);
+    } else {
+      // InvalidCredentials is how a platform with no push credentials (FCM for Android) shows
+      // up — every push to that platform fails, invisibly, until someone looks. The error code
+      // only: it names a cause, never a person.
+      report(`expo push ticket error: ${ticket.details?.error ?? 'unknown'}`);
     }
   }
+}
+
+/** One warning per cause, grouped by its text. Sentry's own scrubbing still runs on it. */
+function report(message: string): void {
+  Sentry.captureMessage(message, { level: 'warning', fingerprint: [message] });
 }
 
 /** Never let a push problem become the caller's problem: the inbox already has the flag. */
@@ -133,31 +150,40 @@ export async function notifyMark(env: Env, toDeviceId: string, send: SendBody): 
         ...(send.bodyNamed !== undefined ? { bodyNamed: send.bodyNamed } : {}),
       };
 
-      const visible = send.state === 'prayed' && send.title !== undefined;
-
-      await deliver(env, toDeviceId, {
-        to: token,
-        data,
-        ttl: PUSH_TTL_SECONDS,
-        ...(visible
-          ? {
-              title: send.title,
-              ...(send.body !== undefined ? { body: send.body } : {}),
-              // Silent in the tray but visible on the screen: no sound and no vibration. No
-              // category either — the app carries no action button on these (see its buddyPush.ts
-              // for the three things that would have to be true first).
-              sound: null,
-              priority: 'normal',
-              channelId: BUDDY_CHANNEL,
-              // Always set, not only when `bodyNamed` rides along: the extension has to run to
-              // decide there is nothing to do, and a phone that has a nickname for a pair whose
-              // sender is on an older app version should still fall through cleanly.
-              mutableContent: true,
-            }
-          : { contentAvailable: true, priority: 'normal' }),
-      });
+      await deliver(env, toDeviceId, markMessage(token, data, send));
     })(),
   );
+}
+
+/**
+ * The push for one mark. A visible one goes at HIGH priority: at normal priority APNs may batch
+ * or hold it (priority 5) and FCM defers it to a Doze maintenance window — a buddy's "prayed"
+ * arriving an hour late is worse than not arriving. Silent pushes stay normal: iOS refuses
+ * high-priority background pushes, and nobody is waiting on bookkeeping.
+ */
+export function markMessage(token: string, data: MarkPayload, send: SendBody): ExpoMessage {
+  const visible = send.state === 'prayed' && send.title !== undefined;
+  return {
+    to: token,
+    data,
+    ttl: PUSH_TTL_SECONDS,
+    ...(visible
+      ? {
+          title: send.title,
+          ...(send.body !== undefined ? { body: send.body } : {}),
+          // Silent in the tray but visible on the screen: no sound and no vibration. No
+          // category either — the app carries no action button on these (see its buddyPush.ts
+          // for the three things that would have to be true first).
+          sound: null,
+          priority: 'high',
+          channelId: BUDDY_CHANNEL,
+          // Always set, not only when `bodyNamed` rides along: the extension has to run to
+          // decide there is nothing to do, and a phone that has a nickname for a pair whose
+          // sender is on an older app version should still fall through cleanly.
+          mutableContent: true,
+        }
+      : { contentAvailable: true, priority: 'normal' }),
+  };
 }
 
 /** Pairing and unpairing are always silent — the app decides what, if anything, to show. */
