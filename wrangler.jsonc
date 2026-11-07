@@ -1,6 +1,9 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "simple-prayer-relay",
+	// The Majani Plus Cloudflare account, where the D1 database lives. Pinned so a login that
+	// can see several accounts never deploys the relay into the wrong one.
+	"account_id": "53fd03da0828e7ca9676fa45a952f7e6",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-09-01",
 	// Required by @sentry/cloudflare.
