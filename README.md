@@ -3,8 +3,8 @@
 This is the entire server side of [Simple Prayer](https://simpleprayer.app)'s buddy mode. It is
 published so that anyone can check that it does what the app's privacy policy says it does.
 
-The app itself is a prayer times and prayer tracking app that keeps everything on your phone. Buddy
-mode is the one exception, and it is opt-in: if you and a friend both choose to, each of you can see
+The app itself is a prayer times and prayer tracking app. Your prayer log is kept on your phone. Buddy
+mode is the one feature that sends what you record anywhere, and it is opt-in: if you and a friend both choose to, each of you can see
 that the other prayed today. This service is what carries that between the two phones.
 
 ## What it does, in one paragraph
@@ -14,6 +14,64 @@ that one flag in the other phone's inbox and sends a push to wake it up. The oth
 the flag and the relay deletes it. If the phone never collects it, the relay deletes it after 24
 hours anyway. That is the whole service.
 
+## When you mark a prayer, step by step
+
+This is the whole journey of one mark, in plain words. Each step names the file that does it.
+
+**1. What your phone sends.** One `POST /send` to `relay.simpleprayer.app`
+([`src/validate.ts`](src/validate.ts) checks every field):
+
+- your phone's random id and a secret, in the `Authorization` header, to prove it is your phone.
+  The relay made both when you turned buddy mode on ([`src/routes.ts`](src/routes.ts), `postDevice`);
+- a random id for the link between you and this buddy;
+- the day and the prayer, for example `2026-11-08` and `dhuhr`;
+- one word: `prayed`, or `cleared` if you undo the mark;
+- the language your app is in, and whether you want buddy notifications yourself;
+- the notification text, already written by your phone in your buddy's language: "Your buddy prayed
+  Dhuhr", and a copy with `{}` where a name goes. No text at all if your buddy turned notifications off.
+
+Like any request on the internet, it also carries your IP address.
+
+**2. What the relay keeps, and for how long.** See the table under "What it stores" below. In short:
+the mark until your buddy's phone collects it, and never collectable after 24 hours; the link and your
+phone's record until you leave, or 90 quiet days; a hash of your phone's secret, never the secret; the
+push token, encrypted; rate-limit counters keyed by an HMAC of your IP address, never the address.
+The language and the notification text are passed on and not stored. No logs.
+
+**3. The doorbell.** The relay asks Expo to send a push to your buddy's phone, and Expo hands it to
+Apple or Google ([`src/push.ts`](src/push.ts)). The push carries "Your buddy prayed Dhuhr", plus the
+link id, day, prayer, word, language and notification choice. So it passes through Expo's service and
+Apple's or Google's. If your buddy's phone has a name saved for you, it puts the name into the text as
+the notification arrives. That name exists only on their phone and was never sent. If the push is
+lost, the phone collects the mark from `GET /inbox` the next time the app opens.
+
+**4. What is never sent.** Your name. The nickname, icon or colour either of you chose. Your location,
+phone number or email. A missed prayer, an unmarked prayer, or whether a prayer was late. Excused
+days, qada, streaks and history. [`src/protocol.ts`](src/protocol.ts) has no field for any of them.
+
+**5. What someone reading the relay could learn.** A full copy of the database shows which random ids
+are paired, and for marks not yet collected (24 hours at most) that a random id "prayed Dhuhr on
+2026-11-08". No names, phone numbers, locations or languages. The push tokens are useless without a
+key that is not in the database. Someone who controlled the relay *while it was running* could see more:
+each message as it passes, with its notification text and IP address.
+
+**6. Why it is not end-to-end encrypted.** End-to-end encryption would mean only the two phones can read
+a mark. We chose not to add it. The relay would still have to know which phone to wake and when, which
+is most of what there is to see. What encryption would hide is which prayer was marked, and the
+notification text has no name in it. That small gain was not worth the extra parts in the app.
+
+**7. Check it yourself.** Everything stored is in [`migrations/0001_init.sql`](migrations/0001_init.sql).
+Every request the relay accepts is in [`src/routes.ts`](src/routes.ts). The app's side is
+[`src/services/buddyRelay.ts`](https://github.com/majani-plus/simple-prayer-app/blob/main/src/services/buddyRelay.ts)
+in the [app repository](https://github.com/majani-plus/simple-prayer-app), and the app's
+[privacy policy](https://simpleprayer.app/privacy) says the same in full.
+
+| | What it is |
+|---|---|
+| **Sent** | random phone id and secret, random link id, day, prayer, `prayed` or `cleared`, app language, notification choice, notification text, IP address |
+| **Kept** | the mark until collected (24 hours at most); the link and the phone's record until you leave or 90 quiet days; an invite code for 24 hours; rate-limit counters for 24 hours. No logs |
+| **Never sent** | name, nicknames, icons, colours, location, phone number, email, missed, late or unmarked prayers, excused days, qada, streaks, history |
+
 ## What it stores
 
 Everything is in [`migrations/0001_init.sql`](migrations/0001_init.sql) — five tables, and the file
@@ -21,7 +79,7 @@ is commented for reading rather than for maintaining.
 
 | table | what it is | how long it lives |
 |---|---|---|
-| `devices` | a random id, the SHA-256 of a secret the phone generated, and an encrypted push token | deleted when you turn buddy mode off; gone after 90 days of silence |
+| `devices` | a random id, the SHA-256 of a secret the relay handed the phone once, and an encrypted push token | deleted when you turn buddy mode off; gone after 90 days of silence |
 | `invites` | a one-time pairing code | 24 hours, or until it is used |
 | `pairs` | two random device ids that agreed to see each other's flags | deleted when either of you unpairs; gone after 90 days of silence |
 | `inbox` | one flag: a pair, a day, a prayer, and `prayed` or `cleared` | **deleted the moment the phone collects it, and after 24 hours regardless** |
@@ -80,9 +138,9 @@ after which the code no longer pairs anybody.
 
 - Every endpoint is scoped to the caller in SQL. "Not yours" and "does not exist" are both an empty
   404, so identifiers cannot be probed.
-- A device authenticates with `Authorization: Bearer <device_id>.<secret>`. Only the SHA-256 of the
-  secret is stored, and it is compared in constant time. The phone keeps the secret in the iOS
-  keychain / Android keystore.
+- A device authenticates with `Authorization: Bearer <device_id>.<secret>`. The relay generates the
+  secret, returns it once, and stores only its SHA-256, compared in constant time. The phone keeps the
+  secret in the iOS keychain / Android keystore.
 - Invite codes are 8 symbols of Crockford base32 — 2^40 — single use, valid 24 hours. Redeeming is
   rate limited to 5 attempts per 10 minutes and 20 per day per caller, on top of an edge limiter.
 - Push tokens are AES-GCM encrypted with a key held only in the Worker's secrets, so a database dump
@@ -100,7 +158,7 @@ after which the code no longer pairs anybody.
   would silently break the feature for everyone.
 
 If the relay is unreachable, the app shows blank buddy rows and tries again next time it is opened.
-Nothing else in the app touches the network, so nothing else is affected.
+Nothing else in the app depends on the relay, so nothing else is affected.
 
 ## Running it
 
@@ -128,4 +186,9 @@ bun run deploy
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). The Simple Prayer name and mark are not covered by it.
+MIT, © Majani Plus LLC. See [LICENSE](LICENSE).
+
+The licence covers the code. The Simple Prayer name, the mosque mark and the app's look are not
+covered by it; see
+[TRADEMARKS.md](https://github.com/majani-plus/simple-prayer-app/blob/main/TRADEMARKS.md) in the
+app repository.
